@@ -1,0 +1,10 @@
+services:
+  - type: web
+    name: claud-remover-ai
+    env: docker
+    plan: starter # Starter plan is recommended for PyTorch memory requirements (1GB RAM)
+    envVars:
+      - key: PORT
+        value: 8080
+      - key: NODE_ENV
+        value: production
