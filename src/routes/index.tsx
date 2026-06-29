@@ -10,7 +10,6 @@ import {
   ShieldCheck,
   AlertTriangle,
   XCircle,
-  Image as ImageIcon,
   Loader2,
   Activity,
 } from "lucide-react";
