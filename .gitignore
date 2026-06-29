@@ -30,3 +30,15 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# Local Test Data
+test_accuracy_inputs/
+test_accuracy_outputs/
+test_inputs/
+test_outputs/
+test_user_outputs/

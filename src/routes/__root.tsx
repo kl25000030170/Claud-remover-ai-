@@ -78,7 +78,11 @@ export const Route = createRootRouteWithContext<{ queryClient: QueryClient }>()(
       { charSet: "utf-8" },
       { name: "viewport", content: "width=device-width, initial-scale=1" },
       { title: "SatelliteVision AI — Real-Time Cloud Reconstruction" },
-      { name: "description", content: "Detect clouds and reconstruct satellite imagery using AI vision and exemplar-based inpainting." },
+      {
+        name: "description",
+        content:
+          "Detect clouds and reconstruct satellite imagery using AI vision and exemplar-based inpainting.",
+      },
       { name: "author", content: "SatelliteVision AI" },
       { property: "og:title", content: "SatelliteVision AI" },
       { property: "og:description", content: "Real-Time Satellite Cloud Reconstruction Platform" },

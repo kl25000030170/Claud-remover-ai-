@@ -1,5 +1,11 @@
 import { createServerFn } from "@tanstack/react-start";
 import { z } from "zod";
+import fs from "node:fs";
+import path from "node:path";
+import { exec } from "node:child_process";
+import { promisify } from "node:util";
+
+const execPromise = promisify(exec);
 
 const inputSchema = z.object({
   imageBase64: z.string().min(10),
@@ -9,106 +15,117 @@ const inputSchema = z.object({
 export const analyzeSatelliteImage = createServerFn({ method: "POST" })
   .inputValidator((data: unknown) => inputSchema.parse(data))
   .handler(async ({ data }) => {
-    const apiKey = process.env.LOVABLE_API_KEY;
-    if (!apiKey) {
-      throw new Error("AI gateway is not configured");
+    const timestamp = Date.now();
+    const tempDir = path.join(process.cwd(), "tmp_reconstruct_" + timestamp);
+
+    // Ensure directory exists
+    if (!fs.existsSync(tempDir)) {
+      fs.mkdirSync(tempDir, { recursive: true });
     }
 
-    const prompt = `You are a satellite image analysis expert. Analyze this image and respond ONLY with a JSON object. No markdown, no explanation, just raw JSON.
-
-Respond with exactly this structure:
-{
-  "isSatelliteImage": boolean,
-  "satelliteConfidence": number,
-  "cloudPercentage": number,
-  "hasHighDensityClouds": boolean,
-  "cloudRegions": [
-    { "xPercent": number, "yPercent": number, "widthPercent": number, "heightPercent": number, "density": number, "shape": "circular"|"irregular"|"linear"|"patchy" }
-  ],
-  "cloudThresholds": { "brightnessMin": number, "saturationMax": number },
-  "terrainFeatures": string[],
-  "terrainContext": {
-    "primaryLandUse": string,
-    "typicalColorR": number,
-    "typicalColorG": number,
-    "typicalColorB": number,
-    "textureComplexity": "low"|"medium"|"high"
-  },
-  "notSatelliteReason": string
-}
-
-Rules:
-- isSatelliteImage = true only if this is a top-down aerial/satellite view of Earth's surface
-- cloudRegions must reflect actual cloud positions in THIS specific image
-- cloudThresholds must be calibrated to THIS image's actual brightness values (0-255)
-- terrainFeatures from: roads, buildings, vegetation, agriculture, water, forest, urban, mountains, desert, coastline, farmland, river
-- typicalColorR/G/B are 0-255 RGB values of the dominant ground terrain
-- If not a satellite image, set isSatelliteImage=false and explain in notSatelliteReason`;
-
-    const res = await fetch("https://ai.gateway.lovable.dev/v1/chat/completions", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${apiKey}`,
-      },
-      body: JSON.stringify({
-        model: "google/gemini-2.5-flash",
-        messages: [
-          {
-            role: "user",
-            content: [
-              { type: "text", text: prompt },
-              {
-                type: "image_url",
-                image_url: { url: `data:${data.mediaType};base64,${data.imageBase64}` },
-              },
-            ],
-          },
-        ],
-      }),
-    });
-
-    if (!res.ok) {
-      const text = await res.text();
-      throw new Error(`AI gateway error ${res.status}: ${text.slice(0, 200)}`);
+    let inputExt = "jpg";
+    if (data.mediaType.includes("png")) {
+      inputExt = "png";
+    } else if (data.mediaType.includes("tiff") || data.mediaType.includes("tif")) {
+      inputExt = "tiff";
     }
+    const inputPath = path.join(tempDir, `input.${inputExt}`);
 
-    const payload = await res.json();
-    const text: string = payload?.choices?.[0]?.message?.content ?? "";
-    const clean = text.replace(/```json|```/g, "").trim();
+    // Write input image to disk
+    const buffer = Buffer.from(data.imageBase64, "base64");
+    fs.writeFileSync(inputPath, buffer);
 
-    // Try to find a JSON object substring
-    let parsed: any;
     try {
-      parsed = JSON.parse(clean);
-    } catch {
-      const match = clean.match(/\{[\s\S]*\}/);
-      if (!match) throw new Error("AI analysis failed — please try a clearer satellite image");
-      parsed = JSON.parse(match[0]);
-    }
+      const pythonPath = path.join(process.cwd(), ".venv", "bin", "python");
+      const scriptPath = path.join(process.cwd(), "src", "lib", "reconstruct.py");
 
-    return parsed as {
-      isSatelliteImage: boolean;
-      satelliteConfidence: number;
-      cloudPercentage: number;
-      hasHighDensityClouds: boolean;
-      cloudRegions: Array<{
-        xPercent: number;
-        yPercent: number;
-        widthPercent: number;
-        heightPercent: number;
-        density: number;
-        shape: string;
-      }>;
-      cloudThresholds: { brightnessMin: number; saturationMax: number };
-      terrainFeatures: string[];
-      terrainContext: {
-        primaryLandUse: string;
-        typicalColorR: number;
-        typicalColorG: number;
-        typicalColorB: number;
-        textureComplexity: string;
+      const cmd = `"${pythonPath}" "${scriptPath}" --image "${inputPath}" --out_dir "${tempDir}"`;
+
+      const { stdout } = await execPromise(cmd);
+
+      // Parse output JSON from Python stdout
+      const result = JSON.parse(stdout.trim());
+
+      if (result.isSatelliteImage === false) {
+        // Clean up directory
+        fs.rmSync(tempDir, { recursive: true, force: true });
+        throw new Error(result.notSatelliteReason || "NOT_SATELLITE");
+      }
+
+      // Read outputs back and convert to base64
+      const maskBuffer = fs.readFileSync(result.maskPath);
+      const reconstBuffer = fs.readFileSync(result.reconstPath);
+      const confidenceBuffer = fs.readFileSync(result.confidencePath);
+      const terrainBuffer = fs.readFileSync(result.terrainMapPath);
+      const originalPath = path.join(tempDir, "original.png");
+      const originalBuffer = fs.readFileSync(originalPath);
+      const overlayPath = path.join(tempDir, "cloud_overlay.png");
+      const overlayBuffer = fs.readFileSync(overlayPath);
+
+      const maskBase64 = `data:image/png;base64,${maskBuffer.toString("base64")}`;
+      const reconstBase64 = `data:image/png;base64,${reconstBuffer.toString("base64")}`;
+      const confidenceBase64 = `data:image/png;base64,${confidenceBuffer.toString("base64")}`;
+      const terrainBase64 = `data:image/png;base64,${terrainBuffer.toString("base64")}`;
+      const originalBase64 = `data:image/png;base64,${originalBuffer.toString("base64")}`;
+      const overlayBase64 = `data:image/png;base64,${overlayBuffer.toString("base64")}`;
+
+      // Clean up directory
+      fs.rmSync(tempDir, { recursive: true, force: true });
+
+      return {
+        isSatelliteImage: result.isSatelliteImage,
+        satelliteConfidence: result.satelliteConfidence,
+        cloudPercentage: result.cloudPercentage,
+        reconstructionConfidence: result.reconstructionConfidence,
+        hasHighDensityClouds: result.cloudPercentage > 40,
+        cloudRegions: [], // Handled entirely server-side now
+        cloudThresholds: { brightnessMin: 0, saturationMax: 0 },
+        terrainFeatures: result.terrainFeatures,
+        terrainContext: {
+          primaryLandUse: result.primaryLandUse,
+          typicalColorR: result.typicalColorR,
+          typicalColorG: result.typicalColorG,
+          typicalColorB: result.typicalColorB,
+          textureComplexity: result.textureComplexity,
+        },
+        notSatelliteReason: result.notSatelliteReason,
+        isDemoMode: false,
+
+        // Upgraded output images & AI validation metrics
+        originalImage: originalBase64,
+        reconstructedImage: reconstBase64,
+        cloudMask: maskBase64,
+        cloudOverlay: overlayBase64,
+        confidenceMap: confidenceBase64,
+        terrainClassificationMap: terrainBase64,
+        psnr: result.psnr,
+        ssim: result.ssim,
+        processingTimeMs: result.processingTimeMs,
+        inferenceTimeMs: result.inferenceTimeMs || 0,
+        modelVersion: result.modelVersion || "unknown",
+        qualityReport: result.qualityReport,
+        predictedFeatures: result.predictedFeatures || [],
+
+        // Phase 8 final analysis report fields
+        cloud_percentage: result.cloud_percentage,
+        inference_time_ms: result.inference_time_ms,
+        total_processing_ms: result.total_processing_ms,
+        psnr_db: result.psnr_db,
+        ssim_score: result.ssim_score,
+        reconstruction_confidence: result.reconstruction_confidence,
+        terrain_prediction: result.terrain_prediction,
+        terrain_confidence: result.terrain_confidence,
+        model_name: result.model_name,
+        model_version: result.model_version,
+        device: result.device,
+        timestamp: result.timestamp,
+        reconstruction_note: result.reconstruction_note,
       };
-      notSatelliteReason: string | null;
-    };
+    } catch (err) {
+      // Cleanup on error
+      if (fs.existsSync(tempDir)) {
+        fs.rmSync(tempDir, { recursive: true, force: true });
+      }
+      throw new Error(`AI reconstruction failed: ${(err as Error).message}`);
+    }
   });

@@ -12,6 +12,7 @@ import {
   XCircle,
   Loader2,
   Activity,
+  Download,
 } from "lucide-react";
 import { analyzeSatelliteImage } from "@/lib/satellite.functions";
 
@@ -59,13 +60,21 @@ interface ClaudeAnalysis {
     textureComplexity: string;
   };
   notSatelliteReason: string | null;
+  isDemoMode?: boolean;
+}
+interface PredictedFeature {
+  class: string;
+  confidence: number;
 }
 interface ProcessingResults {
   cloudMask: string;
+  cloudOverlay: string;
   reconstructedImage: string;
   confidenceMap: string;
   cloudPercentage: number;
   processingTimeMs: number;
+  inferenceTimeMs?: number;
+  modelVersion?: string;
   terrainFeatures: string[];
   uncertaintyRegions: boolean;
   imageMetadata: {
@@ -75,12 +84,25 @@ interface ProcessingResults {
     isSatelliteImage: boolean;
     satelliteConfidence: number;
   };
+  psnr: number;
+  ssim: number;
+  qualityReport?: string;
+  reconstructionConfidence?: number;
+  terrainClassificationMap: string;
+  predictedFeatures?: PredictedFeature[];
 }
 interface LogEntry {
   timestamp: string;
   stage: string;
   message: string;
   duration?: number;
+}
+interface HistoryItem {
+  id: string;
+  filename: string;
+  timestamp: string;
+  uploadedImage: string;
+  results: ProcessingResults;
 }
 
 // ─── Helpers ──────────────────────────────────────────────
@@ -111,245 +133,6 @@ async function resizeIfNeeded(file: File, maxPx = 1024): Promise<string> {
   c.height = Math.round(img.height * scale);
   c.getContext("2d")!.drawImage(img, 0, 0, c.width, c.height);
   return c.toDataURL("image/jpeg", 0.92);
-}
-
-function generateSpiralSamples(
-  cx: number,
-  cy: number,
-  maxR: number,
-  width: number,
-  height: number,
-  isCloud: Uint8Array,
-): [number, number, number][] {
-  const samples: [number, number, number][] = [];
-  for (let r = 2; r <= maxR; r += 2) {
-    const step = Math.max(5, 360 / (r * 4));
-    for (let angle = 0; angle < 360; angle += step) {
-      const rad = (angle * Math.PI) / 180;
-      const sx = Math.round(cx + r * Math.cos(rad));
-      const sy = Math.round(cy + r * Math.sin(rad));
-      if (sx >= 0 && sx < width && sy >= 0 && sy < height) {
-        if (!isCloud[sy * width + sx]) samples.push([sx, sy, r]);
-      }
-    }
-    if (samples.length >= 16) break;
-  }
-  return samples;
-}
-function checkSurrounded(
-  x: number,
-  y: number,
-  width: number,
-  height: number,
-  isCloud: Uint8Array,
-  radius: number,
-): boolean {
-  let cloud = 0,
-    total = 0;
-  for (let dy = -radius; dy <= radius; dy += 2) {
-    for (let dx = -radius; dx <= radius; dx += 2) {
-      const nx = x + dx,
-        ny = y + dy;
-      if (nx >= 0 && nx < width && ny >= 0 && ny < height) {
-        total++;
-        if (isCloud[ny * width + nx]) cloud++;
-      }
-    }
-  }
-  return total > 0 && cloud / total > 0.7;
-}
-
-function generateCloudMask(
-  pixels: ImageData,
-  width: number,
-  height: number,
-  cloudRegions: CloudRegion[],
-  thresholds: { brightnessMin: number; saturationMax: number },
-): string {
-  const canvas = document.createElement("canvas");
-  canvas.width = width;
-  canvas.height = height;
-  const ctx = canvas.getContext("2d")!;
-  const mask = ctx.createImageData(width, height);
-  const data = mask.data;
-  const src = pixels.data;
-  const bMin = thresholds.brightnessMin ?? 180;
-  const sMax = thresholds.saturationMax ?? 40;
-
-  // Init alpha=255 black
-  for (let i = 3; i < data.length; i += 4) data[i] = 255;
-
-  // Region-guided detection
-  for (const region of cloudRegions) {
-    const x1 = Math.max(0, Math.floor((region.xPercent / 100) * width));
-    const y1 = Math.max(0, Math.floor((region.yPercent / 100) * height));
-    const x2 = Math.min(width, x1 + Math.floor((region.widthPercent / 100) * width));
-    const y2 = Math.min(height, y1 + Math.floor((region.heightPercent / 100) * height));
-    for (let y = y1; y < y2; y++) {
-      for (let x = x1; x < x2; x++) {
-        const idx = (y * width + x) * 4;
-        const r = src[idx],
-          g = src[idx + 1],
-          b = src[idx + 2];
-        const brightness = (r + g + b) / 3;
-        const saturation = Math.max(r, g, b) - Math.min(r, g, b);
-        if (brightness > bMin && saturation < sMax) {
-          const intensity = Math.min(255, Math.floor(brightness * region.density * 1.2));
-          // cyan-tinted cloud
-          data[idx] = Math.round(intensity * 0.6);
-          data[idx + 1] = intensity;
-          data[idx + 2] = intensity;
-        }
-      }
-    }
-  }
-
-  // Global pass for missed clouds
-  for (let i = 0; i < src.length; i += 4) {
-    const r = src[i],
-      g = src[i + 1],
-      b = src[i + 2];
-    const brightness = (r + g + b) / 3;
-    const saturation = Math.max(r, g, b) - Math.min(r, g, b);
-    if (data[i + 1] === 0 && brightness > 210 && saturation < 25) {
-      data[i] = Math.round(brightness * 0.6);
-      data[i + 1] = brightness;
-      data[i + 2] = brightness;
-    }
-  }
-
-  ctx.putImageData(mask, 0, 0);
-  return canvas.toDataURL("image/png");
-}
-
-function reconstructImage(
-  pixels: ImageData,
-  width: number,
-  height: number,
-  cloudRegions: CloudRegion[],
-  terrainContext: ClaudeAnalysis["terrainContext"],
-): { dataUrl: string; cloudPixelCount: number } {
-  const canvas = document.createElement("canvas");
-  canvas.width = width;
-  canvas.height = height;
-  const ctx = canvas.getContext("2d")!;
-  ctx.putImageData(pixels, 0, 0);
-  const result = ctx.getImageData(0, 0, width, height);
-  const data = result.data;
-  const src = pixels.data;
-
-  const isCloud = new Uint8Array(width * height);
-  let cloudPixelCount = 0;
-  for (let i = 0; i < src.length; i += 4) {
-    const r = src[i],
-      g = src[i + 1],
-      b = src[i + 2];
-    const brightness = (r + g + b) / 3;
-    const saturation = Math.max(r, g, b) - Math.min(r, g, b);
-    if (brightness > 200 && saturation < 35) {
-      isCloud[i / 4] = 1;
-      cloudPixelCount++;
-    }
-  }
-  for (const region of cloudRegions) {
-    if (region.density <= 0.5) continue;
-    const x1 = Math.max(0, Math.floor((region.xPercent / 100) * width));
-    const y1 = Math.max(0, Math.floor((region.yPercent / 100) * height));
-    const x2 = Math.min(width, x1 + Math.floor((region.widthPercent / 100) * width));
-    const y2 = Math.min(height, y1 + Math.floor((region.heightPercent / 100) * height));
-    for (let y = y1; y < y2; y++)
-      for (let x = x1; x < x2; x++) {
-        const p = y * width + x;
-        if (!isCloud[p]) {
-          isCloud[p] = 1;
-          cloudPixelCount++;
-        }
-      }
-  }
-
-  const searchRadius = Math.max(30, Math.floor(Math.min(width, height) * 0.08));
-
-  // Pass 1: exemplar-based fill
-  for (let y = 0; y < height; y++) {
-    for (let x = 0; x < width; x++) {
-      const p = y * width + x;
-      if (!isCloud[p]) continue;
-      const samples = generateSpiralSamples(x, y, searchRadius, width, height, isCloud);
-      if (samples.length === 0) continue;
-      let sr = 0,
-        sg = 0,
-        sb = 0,
-        ws = 0;
-      for (let s = 0; s < Math.min(12, samples.length); s++) {
-        const [sx, sy, dist] = samples[s];
-        const w = 1 / (dist + 1);
-        const sIdx = (sy * width + sx) * 4;
-        sr += src[sIdx] * w;
-        sg += src[sIdx + 1] * w;
-        sb += src[sIdx + 2] * w;
-        ws += w;
-      }
-      const i4 = p * 4;
-      data[i4] = Math.round(sr / ws);
-      data[i4 + 1] = Math.round(sg / ws);
-      data[i4 + 2] = Math.round(sb / ws);
-      data[i4 + 3] = 255;
-    }
-  }
-
-  // Pass 2: blend terrain color in dense centers
-  const tcR = terrainContext.typicalColorR ?? 90;
-  const tcG = terrainContext.typicalColorG ?? 110;
-  const tcB = terrainContext.typicalColorB ?? 80;
-  for (let y = 0; y < height; y++) {
-    for (let x = 0; x < width; x++) {
-      const p = y * width + x;
-      if (!isCloud[p]) continue;
-      const surrounded = checkSurrounded(x, y, width, height, isCloud, 6);
-      const blend = surrounded ? 0.5 : 0.18;
-      const i4 = p * 4;
-      data[i4] = Math.round(data[i4] * (1 - blend) + tcR * blend);
-      data[i4 + 1] = Math.round(data[i4 + 1] * (1 - blend) + tcG * blend);
-      data[i4 + 2] = Math.round(data[i4 + 2] * (1 - blend) + tcB * blend);
-    }
-  }
-
-  ctx.putImageData(result, 0, 0);
-  return { dataUrl: canvas.toDataURL("image/png"), cloudPixelCount };
-}
-
-function generateConfidenceMap(
-  pixels: ImageData,
-  width: number,
-  height: number,
-): string {
-  const canvas = document.createElement("canvas");
-  canvas.width = width;
-  canvas.height = height;
-  const ctx = canvas.getContext("2d")!;
-  const map = ctx.createImageData(width, height);
-  const data = map.data;
-  const src = pixels.data;
-  for (let i = 0; i < src.length; i += 4) {
-    const r = src[i],
-      g = src[i + 1],
-      b = src[i + 2];
-    const brightness = (r + g + b) / 3;
-    const saturation = Math.max(r, g, b) - Math.min(r, g, b);
-    let confidence: number;
-    if (brightness > 200 && saturation < 35) {
-      const density = brightness / 255;
-      confidence = Math.max(0.05, 1 - density);
-    } else {
-      confidence = 0.92 + Math.random() * 0.08;
-    }
-    data[i] = Math.round(255 * (1 - confidence));
-    data[i + 1] = Math.round(255 * confidence);
-    data[i + 2] = 40;
-    data[i + 3] = 220;
-  }
-  ctx.putImageData(map, 0, 0);
-  return canvas.toDataURL("image/png");
 }
 
 function extractDominantColors(pixels: ImageData): string[] {
@@ -396,6 +179,7 @@ function SatelliteVisionApp() {
   const [log, setLog] = useState<LogEntry[]>([]);
   const [dragActive, setDragActive] = useState(false);
   const [sliderPos, setSliderPos] = useState(50);
+  const [history, setHistory] = useState<HistoryItem[]>([]);
   const inputRef = useRef<HTMLInputElement>(null);
 
   const addLog = useCallback((stage: string, message: string, duration?: number) => {
@@ -413,8 +197,34 @@ function SatelliteVisionApp() {
     setSliderPos(50);
   }, []);
 
+  // Load history on mount
+  useEffect(() => {
+    try {
+      const saved = localStorage.getItem("cloudclear_history");
+      if (saved) {
+        setHistory(JSON.parse(saved));
+      }
+    } catch (e) {
+      console.error("Failed to load history", e);
+    }
+  }, []);
+
+  const loadHistoryItem = (item: HistoryItem) => {
+    reset();
+    setUploadedImage(item.uploadedImage);
+    setResults(item.results);
+    setCurrentStage(5);
+    addLog("HISTORY", `Restored processed run: ${item.filename}`);
+  };
+
+  const clearHistory = () => {
+    setHistory([]);
+    localStorage.removeItem("cloudclear_history");
+    addLog("HISTORY", "Run history cleared.");
+  };
+
   const handleFile = useCallback(
-    async (file: File) => {
+    async (file: File): Promise<ProcessingResults | null> => {
       reset();
       setOriginalFile(file);
       setIsProcessing(true);
@@ -423,93 +233,138 @@ function SatelliteVisionApp() {
         addLog("UPLOAD", `Image received — ${file.name} (${Math.round(file.size / 1024)}KB)`);
         setCurrentStage(1);
 
-        const base64Full = await resizeIfNeeded(file, 1024);
-        setUploadedImage(base64Full);
-        const img = await loadImage(base64Full);
-        const canvas = document.createElement("canvas");
-        canvas.width = img.width;
-        canvas.height = img.height;
-        const ctx = canvas.getContext("2d")!;
-        ctx.drawImage(img, 0, 0);
-        const pixels = ctx.getImageData(0, 0, img.width, img.height);
+        const isTiff = file.name.endsWith(".tif") || file.name.endsWith(".tiff");
+        let base64Full: string;
+        let imageData: string;
+        let mediaType: string;
 
-        addLog("VALIDATE", "Sending to Claude Vision for satellite image classification...");
-        await new Promise((r) => setTimeout(r, 200));
-
-        const imageData = base64Full.split(",")[1];
-        const mediaType = base64Full.substring(5, base64Full.indexOf(";"));
-        let analysis: ClaudeAnalysis;
-        try {
-          analysis = (await analyze({ data: { imageBase64: imageData, mediaType } })) as ClaudeAnalysis;
-        } catch (e: any) {
-          throw new Error(e?.message || "AI analysis failed — please try a clearer satellite image");
+        if (isTiff) {
+          addLog("UPLOAD", "TIFF/GeoTIFF format detected. Bypassing browser canvas downscaling.");
+          base64Full = await fileToBase64(file);
+          setUploadedImage(base64Full);
+          const commaIdx = base64Full.indexOf(",");
+          imageData = base64Full.substring(commaIdx + 1);
+          mediaType = "image/tiff";
+        } else {
+          base64Full = await resizeIfNeeded(file, 1024);
+          setUploadedImage(base64Full);
+          const commaIdx = base64Full.indexOf(",");
+          imageData = base64Full.substring(commaIdx + 1);
+          mediaType = base64Full.substring(5, base64Full.indexOf(";"));
         }
 
-        if (!analysis.isSatelliteImage) {
+        addLog("VALIDATE", "Uploading satellite image to server AI engine...");
+        await new Promise((r) => setTimeout(r, 100));
+
+        addLog("VALIDATE", "Initializing PyTorch Reconstruction Model on Server...");
+
+        let response: Awaited<ReturnType<typeof analyze>>;
+        try {
+          response = await analyze({
+            data: { imageBase64: imageData, mediaType },
+          });
+        } catch (e) {
+          throw new Error(
+            (e as Error)?.message || "AI analysis failed — please try a clearer satellite image",
+          );
+        }
+
+        if (!response.isSatelliteImage) {
           throw new Error("NOT_SATELLITE");
         }
-        addLog("VALIDATE", `Satellite confidence ${analysis.satelliteConfidence}% — proceeding`);
+
+        // For TIFF uploads, the backend returns a browser-compatible preview
+        let finalOriginalImage = response.originalImage || base64Full;
+        setUploadedImage(finalOriginalImage);
+
+        // Load preview in canvas to get metadata and colors
+        const previewImg = await loadImage(finalOriginalImage);
+        const previewCanvas = document.createElement("canvas");
+        previewCanvas.width = previewImg.width;
+        previewCanvas.height = previewImg.height;
+        const previewCtx = previewCanvas.getContext("2d")!;
+        previewCtx.drawImage(previewImg, 0, 0);
+        const previewPixels = previewCtx.getImageData(0, 0, previewImg.width, previewImg.height);
+
         setCurrentStage(2);
+        addLog(
+          "CLOUD_DETECT",
+          "Advanced Cloud segmentation: combining LAB, HSV, adaptive thresholds, and morphology",
+        );
+        addLog("CLOUD_DETECT", `Total cloud coverage estimated at ${response.cloudPercentage}%`);
         await new Promise((r) => setTimeout(r, 300));
 
-        addLog(
-          "CLOUD_DETECT",
-          `Identified ${analysis.cloudRegions.length} cloud regions via pixel analysis`,
-        );
-        addLog(
-          "CLOUD_DETECT",
-          `Total cloud coverage estimated at ${analysis.cloudPercentage}%`,
-        );
-        const cloudMask = generateCloudMask(
-          pixels,
-          img.width,
-          img.height,
-          analysis.cloudRegions,
-          analysis.cloudThresholds,
-        );
         setCurrentStage(3);
-        await new Promise((r) => setTimeout(r, 300));
-
-        const { dataUrl: reconstructed, cloudPixelCount } = reconstructImage(
-          pixels,
-          img.width,
-          img.height,
-          analysis.cloudRegions,
-          analysis.terrainContext,
+        addLog(
+          "RECONSTRUCT",
+          "PyTorch Generative AI edge propagation & multi-scale blending active",
         );
         addLog(
           "RECONSTRUCT",
-          `Running exemplar-based inpainting on ${cloudPixelCount} cloud pixels`,
+          `Terrain context: ${response.terrainContext.primaryLandUse} (${response.terrainContext.textureComplexity} texture complexity)`,
         );
-        addLog("RECONSTRUCT", `Terrain context: ${analysis.terrainContext.primaryLandUse}`);
-        setCurrentStage(4);
         await new Promise((r) => setTimeout(r, 300));
 
-        addLog("CONFIDENCE", "Generating reconstruction confidence map");
-        const confidence = generateConfidenceMap(pixels, img.width, img.height);
+        setCurrentStage(4);
+        addLog(
+          "CONFIDENCE",
+          "Confidence mapping: distance transform and opacity analysis computed",
+        );
+        await new Promise((r) => setTimeout(r, 200));
 
         const elapsed = Date.now() - startTime;
         setCurrentStage(5);
-        addLog("OUTPUT", `Processing complete in ${elapsed}ms`, elapsed);
+        addLog(
+          "OUTPUT",
+          `AI reconstruction complete in ${response.processingTimeMs}ms (using ${response.deviceUsed})`,
+          response.processingTimeMs,
+        );
 
-        setResults({
-          cloudMask,
-          reconstructedImage: reconstructed,
-          confidenceMap: confidence,
-          cloudPercentage: analysis.cloudPercentage,
-          processingTimeMs: elapsed,
-          terrainFeatures: analysis.terrainFeatures,
-          uncertaintyRegions: analysis.hasHighDensityClouds,
+        const newResults: ProcessingResults = {
+          cloudMask: response.cloudMask,
+          cloudOverlay: response.cloudOverlay,
+          reconstructedImage: response.reconstructedImage,
+          confidenceMap: response.confidenceMap,
+          cloudPercentage: response.cloudPercentage,
+          processingTimeMs: response.processingTimeMs,
+          inferenceTimeMs: response.inferenceTimeMs,
+          modelVersion: response.modelVersion,
+          terrainFeatures: response.terrainFeatures,
+          uncertaintyRegions: response.hasHighDensityClouds,
+          psnr: response.psnr,
+          ssim: response.ssim,
+          qualityReport: response.qualityReport,
+          reconstructionConfidence: response.reconstructionConfidence,
+          terrainClassificationMap: response.terrainClassificationMap,
+          predictedFeatures: response.predictedFeatures,
           imageMetadata: {
-            width: img.width,
-            height: img.height,
-            dominantColors: extractDominantColors(pixels),
+            width: previewImg.width,
+            height: previewImg.height,
+            dominantColors: extractDominantColors(previewPixels),
             isSatelliteImage: true,
-            satelliteConfidence: analysis.satelliteConfidence,
+            satelliteConfidence: response.satelliteConfidence,
           },
+        };
+
+        setResults(newResults);
+
+        // Add to run history
+        const newHistoryItem: HistoryItem = {
+          id: `${Date.now()}_${Math.random()}`,
+          filename: file.name,
+          timestamp: new Date().toLocaleTimeString(),
+          uploadedImage: finalOriginalImage,
+          results: newResults,
+        };
+        setHistory((prev) => {
+          const updated = [newHistoryItem, ...prev].slice(0, 20);
+          localStorage.setItem("cloudclear_history", JSON.stringify(updated));
+          return updated;
         });
-      } catch (e: any) {
-        const msg = e?.message || "Unknown error";
+
+        return newResults;
+      } catch (e) {
+        const msg = (e as Error)?.message || "Unknown error";
         if (msg === "NOT_SATELLITE") {
           setError("NOT_SATELLITE");
           addLog("ERROR", "Image rejected: not a satellite image");
@@ -518,6 +373,7 @@ function SatelliteVisionApp() {
           addLog("ERROR", msg);
         }
         setCurrentStage(0);
+        return null;
       } finally {
         setIsProcessing(false);
       }
@@ -525,11 +381,32 @@ function SatelliteVisionApp() {
     [addLog, analyze, reset],
   );
 
+  const handleBatchFiles = useCallback(
+    async (files: File[]) => {
+      setIsProcessing(true);
+      addLog("BATCH", `Starting batch processing of ${files.length} images...`);
+      for (let i = 0; i < files.length; i++) {
+        const file = files[i];
+        addLog("BATCH", `[${i + 1}/${files.length}] Processing file: ${file.name}`);
+        try {
+          await handleFile(file);
+        } catch (e) {
+          addLog("BATCH", `Error processing ${file.name}: ${(e as Error).message}`);
+        }
+      }
+      addLog("BATCH", "Batch processing complete.");
+      setIsProcessing(false);
+    },
+    [handleFile, addLog],
+  );
+
   const onDrop = (e: React.DragEvent) => {
     e.preventDefault();
     setDragActive(false);
-    const f = e.dataTransfer.files?.[0];
-    if (f) handleFile(f);
+    const files = Array.from(e.dataTransfer.files || []);
+    if (files.length > 0) {
+      handleBatchFiles(files);
+    }
   };
 
   return (
@@ -547,11 +424,12 @@ function SatelliteVisionApp() {
         <input
           ref={inputRef}
           type="file"
-          accept="image/*"
+          accept="image/*,.tif,.tiff"
+          multiple
           className="hidden"
           onChange={(e) => {
-            const f = e.target.files?.[0];
-            if (f) handleFile(f);
+            const files = Array.from(e.target.files || []);
+            if (files.length > 0) handleBatchFiles(files);
             e.target.value = "";
           }}
         />
@@ -598,10 +476,18 @@ function SatelliteVisionApp() {
           />
         )}
 
-        <ProcessingLog log={log} isProcessing={isProcessing} />
+        <div className="grid grid-cols-1 gap-6 md:grid-cols-3 mt-6">
+          <div className="md:col-span-1">
+            <HistoryPanel history={history} onSelect={loadHistoryItem} onClear={clearHistory} />
+          </div>
+          <div className="md:col-span-2">
+            <ProcessingLog log={log} isProcessing={isProcessing} />
+          </div>
+        </div>
       </main>
       <footer className="mx-auto max-w-7xl px-4 py-6 text-mono text-xs text-muted-foreground">
-        SatelliteVision AI · pixel pipeline runs in your browser · vision inference via secure server
+        SatelliteVision AI · pixel pipeline runs in your browser · vision inference via secure
+        server
       </footer>
     </div>
   );
@@ -740,11 +626,7 @@ function PipelineBar({
               </div>
               {i < STAGES.length - 1 && (
                 <div className="mx-2 h-px flex-1 relative overflow-hidden">
-                  <div
-                    className={`absolute inset-0 ${
-                      isDone ? "bg-success/60" : "bg-border"
-                    }`}
-                  />
+                  <div className={`absolute inset-0 ${isDone ? "bg-success/60" : "bg-border"}`} />
                   {isActive && <div className="animate-flow absolute inset-0" />}
                 </div>
               )}
@@ -754,6 +636,78 @@ function PipelineBar({
       </div>
     </section>
   );
+}
+
+function HistoryPanel({
+  history,
+  onSelect,
+  onClear,
+}: {
+  history: HistoryItem[];
+  onSelect: (item: HistoryItem) => void;
+  onClear: () => void;
+}) {
+  return (
+    <section className="h-full overflow-hidden rounded-2xl border border-border bg-surface/60 flex flex-col">
+      <div className="flex items-center justify-between border-b border-border/60 px-4 py-2 bg-surface/40">
+        <div className="flex items-center gap-2">
+          <Activity className="h-4 w-4 text-primary" />
+          <span className="text-display text-sm font-semibold">Run History</span>
+        </div>
+        {history.length > 0 && (
+          <button
+            onClick={onClear}
+            className="text-mono text-[10px] text-destructive hover:underline"
+          >
+            Clear All
+          </button>
+        )}
+      </div>
+      <div className="max-h-64 overflow-y-auto bg-background/60 p-3 flex-1">
+        {history.length === 0 ? (
+          <p className="text-mono text-xs text-muted-foreground text-center py-8">
+            No history yet. Process an image to save.
+          </p>
+        ) : (
+          <div className="space-y-2">
+            {history.map((item) => (
+              <button
+                key={item.id}
+                onClick={() => onSelect(item)}
+                className="w-full flex items-center gap-3 p-2 rounded-lg border border-border/50 bg-surface/40 hover:bg-surface/80 hover:border-primary/50 text-left transition"
+              >
+                <div className="h-10 w-10 overflow-hidden rounded border border-border flex-shrink-0 bg-background">
+                  <img
+                    src={item.results.reconstructedImage}
+                    alt="Reconstructed thumb"
+                    className="h-full w-full object-cover"
+                  />
+                </div>
+                <div className="flex-1 min-w-0">
+                  <p className="text-display text-xs font-semibold truncate text-foreground">
+                    {item.filename}
+                  </p>
+                  <p className="text-mono text-[9px] text-muted-foreground flex justify-between">
+                    <span>{item.timestamp}</span>
+                    <span className="text-primary font-bold">{item.results.cloudPercentage}% cloud</span>
+                  </p>
+                </div>
+              </button>
+            ))}
+          </div>
+        )}
+      </div>
+    </section>
+  );
+}
+
+function downloadImage(base64Data: string, filename: string) {
+  const link = document.createElement("a");
+  link.href = base64Data;
+  link.download = filename;
+  document.body.appendChild(link);
+  link.click();
+  document.body.removeChild(link);
 }
 
 function ResultsGrid({
@@ -775,6 +729,15 @@ function ResultsGrid({
         title="Original Satellite Image"
         badge={`${results.imageMetadata.width}×${results.imageMetadata.height}px · ${originalFile?.type?.split("/")[1]?.toUpperCase() || "IMG"}`}
         delay={0}
+        topRight={
+          <button
+            onClick={() => downloadImage(original, "original.png")}
+            className="text-mono rounded-md border border-primary/60 bg-primary/10 px-2 py-0.5 text-[10px] uppercase tracking-wider text-primary hover:bg-primary/20 flex items-center gap-1"
+          >
+            <Download className="h-3 w-3" />
+            Download
+          </button>
+        }
       >
         <img src={original} alt="Original" className="h-full w-full object-cover" />
       </Panel>
@@ -783,6 +746,15 @@ function ResultsGrid({
         title="Detected Cloud Mask"
         badge={`Cloud Coverage: ${results.cloudPercentage}%`}
         delay={100}
+        topRight={
+          <button
+            onClick={() => downloadImage(results.cloudMask, "cloud_mask.png")}
+            className="text-mono rounded-md border border-primary/60 bg-primary/10 px-2 py-0.5 text-[10px] uppercase tracking-wider text-primary hover:bg-primary/20 flex items-center gap-1"
+          >
+            <Download className="h-3 w-3" />
+            Download
+          </button>
+        }
       >
         <img src={results.cloudMask} alt="Cloud mask" className="h-full w-full object-cover" />
       </Panel>
@@ -792,9 +764,18 @@ function ResultsGrid({
         badge={results.terrainFeatures.slice(0, 2).join(" · ") || "terrain"}
         delay={200}
         topRight={
-          <span className="text-mono rounded-md border border-success/60 bg-success/10 px-2 py-0.5 text-[10px] uppercase tracking-wider text-success">
-            Reconstructed
-          </span>
+          <div className="flex items-center gap-2">
+            <button
+              onClick={() => downloadImage(results.reconstructedImage, "reconstructed.png")}
+              className="text-mono rounded-md border border-primary/60 bg-primary/10 px-2 py-0.5 text-[10px] uppercase tracking-wider text-primary hover:bg-primary/20 flex items-center gap-1"
+            >
+              <Download className="h-3 w-3" />
+              Download
+            </button>
+            <span className="text-mono rounded-md border border-success/60 bg-success/10 px-2 py-0.5 text-[10px] uppercase tracking-wider text-success">
+              Reconstructed
+            </span>
+          </div>
         }
       >
         <img
@@ -813,7 +794,19 @@ function ResultsGrid({
         />
       </Panel>
 
-      <Panel title="Reconstruction Confidence" delay={400}>
+      <Panel
+        title="Reconstruction Confidence"
+        delay={400}
+        topRight={
+          <button
+            onClick={() => downloadImage(results.confidenceMap, "confidence_map.png")}
+            className="text-mono rounded-md border border-primary/60 bg-primary/10 px-2 py-0.5 text-[10px] uppercase tracking-wider text-primary hover:bg-primary/20 flex items-center gap-1"
+          >
+            <Download className="h-3 w-3" />
+            Download
+          </button>
+        }
+      >
         <div className="animate-reveal h-full w-full">
           <img
             src={results.confidenceMap}
@@ -830,18 +823,85 @@ function ResultsGrid({
         </div>
       </Panel>
 
+      <Panel
+        title="Terrain Classification Map"
+        delay={450}
+        topRight={
+          <button
+            onClick={() => downloadImage(results.terrainClassificationMap, "terrain_classification.png")}
+            className="text-mono rounded-md border border-primary/60 bg-primary/10 px-2 py-0.5 text-[10px] uppercase tracking-wider text-primary hover:bg-primary/20 flex items-center gap-1"
+          >
+            <Download className="h-3 w-3" />
+            Download
+          </button>
+        }
+      >
+        <div className="animate-reveal h-full w-full">
+          <img
+            src={results.terrainClassificationMap}
+            alt="Terrain Classification"
+            className="h-full w-full object-cover"
+          />
+        </div>
+        <div className="absolute inset-x-3 bottom-3 rounded-md bg-background/80 p-2 backdrop-blur">
+          <div className="text-mono flex flex-wrap gap-x-2 gap-y-1 text-[8px] uppercase tracking-wider text-muted-foreground justify-center">
+            <span className="flex items-center gap-1">
+              <span className="h-1.5 w-1.5 rounded-full bg-[#b41e1e]" />
+              Urban Area
+            </span>
+            <span className="flex items-center gap-1">
+              <span className="h-1.5 w-1.5 rounded-full bg-[#f05050]" />
+              Buildings
+            </span>
+            <span className="flex items-center gap-1">
+              <span className="h-1.5 w-1.5 rounded-full bg-[#808080]" />
+              Roads
+            </span>
+            <span className="flex items-center gap-1">
+              <span className="h-1.5 w-1.5 rounded-full bg-[#228b22]" />
+              Forest
+            </span>
+            <span className="flex items-center gap-1">
+              <span className="h-1.5 w-1.5 rounded-full bg-[#7cfc00]" />
+              Agri
+            </span>
+            <span className="flex items-center gap-1">
+              <span className="h-1.5 w-1.5 rounded-full bg-[#0000ff]" />
+              Water
+            </span>
+            <span className="flex items-center gap-1">
+              <span className="h-1.5 w-1.5 rounded-full bg-[#8b4513]" />
+              Mountain
+            </span>
+            <span className="flex items-center gap-1">
+              <span className="h-1.5 w-1.5 rounded-full bg-[#d2b48c]" />
+              Desert
+            </span>
+            <span className="flex items-center gap-1">
+              <span className="h-1.5 w-1.5 rounded-full bg-[#8e6b23]" />
+              Bare Land
+            </span>
+          </div>
+        </div>
+      </Panel>
+
       <Panel title="Analysis Report" delay={500}>
         <div className="grid h-full grid-cols-1 gap-2 p-4 text-sm">
           <Stat label="☁️ Cloud Coverage" value={`${results.cloudPercentage}%`} />
-          <Stat label="⏱ Processing Time" value={`${results.processingTimeMs}ms`} />
+          <Stat label="⏱ Total Process Time" value={`${results.processingTimeMs}ms`} />
+          {results.inferenceTimeMs !== undefined && (
+            <Stat label="⚡️ Model Inference Time" value={`${results.inferenceTimeMs}ms`} />
+          )}
+          {results.modelVersion && (
+            <Stat label="🤖 Reconstruction Model" value={results.modelVersion} />
+          )}
+          <Stat label="🎯 PSNR (Peak SNR)" value={`${results.psnr} dB`} />
+          <Stat label="⚖️ SSIM (Structural Sim)" value={results.ssim.toFixed(4)} />
           <Stat
             label="📐 Resolution"
             value={`${results.imageMetadata.width}×${results.imageMetadata.height}px`}
           />
-          <Stat
-            label="🌍 Terrain"
-            value={results.terrainFeatures.join(", ") || "—"}
-          />
+          <Stat label="🌍 Terrain" value={results.terrainFeatures.join(", ") || "—"} />
           <Stat
             label="🎯 Satellite Confidence"
             value={`${results.imageMetadata.satelliteConfidence}%`}
@@ -856,11 +916,51 @@ function ResultsGrid({
               />
             ))}
           </div>
-          {results.uncertaintyRegions && (
+          {results.qualityReport && (
+            <div
+              className={`text-mono mt-2 rounded-md border p-2 text-[11px] ${
+                results.qualityReport.includes("Poor")
+                  ? "border-warning/50 bg-warning/10 text-warning"
+                  : "border-primary/50 bg-primary/10 text-primary"
+              }`}
+            >
+              {results.qualityReport.includes("Poor") ? "⚠️" : "✨"} {results.qualityReport}
+            </div>
+          )}
+          {results.uncertaintyRegions && !results.qualityReport?.includes("Poor") && (
             <div className="text-mono mt-2 rounded-md border border-warning/50 bg-warning/10 p-2 text-[11px] text-warning">
-              ⚠️ Uncertainty: dense cloud cover detected. The optical image does not
-              contain enough information beneath the cloud to fully reconstruct this
-              region.
+              ⚠️ Uncertainty: dense cloud cover detected. The optical image does not contain enough
+              information beneath the cloud to fully reconstruct this region.
+            </div>
+          )}
+        </div>
+      </Panel>
+
+      <Panel title="AI Predicted Hidden Terrain" delay={550}>
+        <div className="grid h-full grid-cols-1 gap-3 p-4 text-sm overflow-y-auto">
+          <p className="text-[10px] text-muted-foreground uppercase tracking-wider text-mono">
+            ⚠️ Most Probable Features Estimated Under Cloud Cover
+          </p>
+          {!results.predictedFeatures || results.predictedFeatures.length === 0 ? (
+            <p className="text-mono text-xs text-muted-foreground py-6 text-center">
+              No clouds detected. No hidden terrain estimation needed.
+            </p>
+          ) : (
+            <div className="space-y-3">
+              {results.predictedFeatures.map((item) => (
+                <div key={item.class} className="space-y-1">
+                  <div className="flex justify-between text-xs text-mono">
+                    <span className="font-semibold text-foreground">{item.class}</span>
+                    <span className="text-primary font-bold">{item.confidence}% Estimated</span>
+                  </div>
+                  <div className="h-1.5 w-full rounded-full bg-border/40 overflow-hidden relative">
+                    <div
+                      className="absolute inset-y-0 left-0 bg-primary rounded-full transition-all duration-500"
+                      style={{ width: `${item.confidence}%` }}
+                    />
+                  </div>
+                </div>
+              ))}
             </div>
           )}
         </div>
@@ -932,19 +1032,21 @@ function ComparisonSlider({
   const containerRef = useRef<HTMLDivElement>(null);
   const draggingRef = useRef(false);
 
-  const move = (clientX: number) => {
-    const el = containerRef.current;
-    if (!el) return;
-    const r = el.getBoundingClientRect();
-    const x = Math.min(Math.max(clientX - r.left, 0), r.width);
-    requestAnimationFrame(() => setPos((x / r.width) * 100));
-  };
+  const move = useCallback(
+    (clientX: number) => {
+      const el = containerRef.current;
+      if (!el) return;
+      const r = el.getBoundingClientRect();
+      const x = Math.min(Math.max(clientX - r.left, 0), r.width);
+      requestAnimationFrame(() => setPos((x / r.width) * 100));
+    },
+    [setPos],
+  );
 
   useEffect(() => {
     const up = () => (draggingRef.current = false);
     const mv = (e: MouseEvent) => draggingRef.current && move(e.clientX);
-    const tm = (e: TouchEvent) =>
-      draggingRef.current && move(e.touches[0]?.clientX ?? 0);
+    const tm = (e: TouchEvent) => draggingRef.current && move(e.touches[0]?.clientX ?? 0);
     window.addEventListener("mouseup", up);
     window.addEventListener("mousemove", mv);
     window.addEventListener("touchmove", tm);
@@ -955,7 +1057,7 @@ function ComparisonSlider({
       window.removeEventListener("touchmove", tm);
       window.removeEventListener("touchend", up);
     };
-  }, []);
+  }, [move]);
 
   return (
     <div
@@ -970,11 +1072,12 @@ function ComparisonSlider({
         move(e.touches[0]?.clientX ?? 0);
       }}
     >
-      <img src={right} alt="Reconstructed" className="absolute inset-0 h-full w-full object-cover" />
-      <div
-        className="absolute inset-y-0 left-0 overflow-hidden"
-        style={{ width: `${pos}%` }}
-      >
+      <img
+        src={right}
+        alt="Reconstructed"
+        className="absolute inset-0 h-full w-full object-cover"
+      />
+      <div className="absolute inset-y-0 left-0 overflow-hidden" style={{ width: `${pos}%` }}>
         <img
           src={left}
           alt="Original"
@@ -988,10 +1091,7 @@ function ComparisonSlider({
       <span className="text-mono absolute right-2 top-2 rounded bg-background/70 px-2 py-0.5 text-[10px] uppercase tracking-wider text-success backdrop-blur">
         Reconstructed
       </span>
-      <div
-        className="absolute inset-y-0 w-px bg-primary"
-        style={{ left: `${pos}%` }}
-      >
+      <div className="absolute inset-y-0 w-px bg-primary" style={{ left: `${pos}%` }}>
         <div className="glow-cyan absolute top-1/2 -translate-x-1/2 -translate-y-1/2 flex h-9 w-9 cursor-ew-resize items-center justify-center rounded-full border border-primary bg-background text-primary">
           <span className="text-mono text-xs">◀▶</span>
         </div>
@@ -1000,13 +1100,7 @@ function ComparisonSlider({
   );
 }
 
-function ProcessingLog({
-  log,
-  isProcessing,
-}: {
-  log: LogEntry[];
-  isProcessing: boolean;
-}) {
+function ProcessingLog({ log, isProcessing }: { log: LogEntry[]; isProcessing: boolean }) {
   const [open, setOpen] = useState(true);
   const endRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
