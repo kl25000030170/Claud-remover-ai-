@@ -27,6 +27,17 @@ from reconstruct import (
 
 app = FastAPI(title="CloudClear AI Production Server")
 
+@app.get("/health")
+def health():
+    return {"status": "healthy", "model_loaded": model_loaded}
+
+@app.get("/ready")
+def ready():
+    if model_loaded and reconst_model is not None:
+        return {"status": "ready"}
+    else:
+        raise HTTPException(status_code=503, detail="Model is still loading or failed to load")
+
 # Singleton Model Initialization
 device = check_device()
 reconst_model = None
@@ -357,19 +368,21 @@ def analyze(req: AnalyzeRequest):
             gc.collect()
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
-            raise HTTPException(
-                status_code=500,
-                detail=f"AI inference halted due to system resource constraints: {str(err)}. Try uploading a smaller image or retry shortly."
-            )
+            return {
+                "success": False,
+                "error": f"AI inference halted due to system resource constraints: {str(err)}. Try uploading a smaller image or retry shortly.",
+                "stage": "reconstruction"
+            }
         except Exception as e:
             import traceback
             traceback.print_exc()
             if isinstance(e, HTTPException):
                 raise e
-            raise HTTPException(
-                status_code=500,
-                detail=f"AI analysis failed: {str(e)}"
-            )
+            return {
+                "success": False,
+                "error": f"AI analysis failed: {str(e)}",
+                "stage": "reconstruction"
+            }
 
 if __name__ == "__main__":
     import uvicorn

@@ -38,8 +38,8 @@ export const analyzeSatelliteImage = createServerFn({ method: "POST" })
 
       if (response.ok) {
         const result = await response.json();
-        if (result.error) {
-          throw new Error(result.error);
+        if (result.success === false || result.error) {
+          throw new Error(result.error || "AI Reconstruction failed");
         }
         console.log("[DevOps] Fast execution successful! No process spawned.");
         return result;
