@@ -2,8 +2,9 @@
 FROM nikolaik/python-nodejs:python3.11-nodejs20-slim
 
 # Install system libraries needed by OpenCV and compile tools
+# Replaced deprecated libgl1-mesa-glx with libgl1
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    libgl1-mesa-glx \
+    libgl1 \
     libglib2.0-0 \
     build-essential \
     && rm -rf /var/lib/apt/lists/*
@@ -21,13 +22,9 @@ RUN npm ci
 RUN python -m venv .venv
 RUN .venv/bin/pip install --no-cache-dir --upgrade pip
 
-# Install Python remote sensing and computer vision libraries
-RUN .venv/bin/pip install --no-cache-dir \
-    torch --index-url https://download.pytorch.org/whl/cpu \
-    torchvision --index-url https://download.pytorch.org/whl/cpu \
-    opencv-python-headless \
-    numpy \
-    pillow
+# Copy Python requirements and install CPU-optimized packages
+COPY requirements.txt ./
+RUN .venv/bin/pip install --no-cache-dir -r requirements.txt
 
 # Copy the rest of the workspace files
 COPY . .
@@ -37,7 +34,7 @@ ENV NITRO_PRESET=node-server
 ENV NODE_ENV=production
 RUN npm run build
 
-# Expose default port (Render will override $PORT dynamically)
+# Expose default port (Railway will override $PORT dynamically)
 ENV PORT=8080
 EXPOSE 8080
 
