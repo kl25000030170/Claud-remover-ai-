@@ -16,7 +16,7 @@
 - **Stage 6-7 (Morphology & Component Filtering)**: Edge Gaussian smoothing, contour-based internal hole-filling, and components smaller than 150 pixels filtered out to clean noise.
 
 ## 3. Performance Metrics (Averages over 20 Diverse Satellite Images)
-- **Mean Inference/Processing Time**: `8057.4 ms`
-- **Average Reconstruction PSNR**: `35.59 dB`
-- **Average Reconstruction SSIM**: `0.8942`
+- **Mean Inference/Processing Time**: `1868.0 ms`
+- **Average Reconstruction PSNR**: `35.79 dB`
+- **Average Reconstruction SSIM**: `0.8867`
 - **Verification Status**: PASSED. Unique masks and percentages generated; false positives successfully avoided on snow, sand, and buildings.

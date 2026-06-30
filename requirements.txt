@@ -4,3 +4,6 @@ torchvision
 opencv-python-headless
 numpy
 pillow
+fastapi
+uvicorn
+python-multipart

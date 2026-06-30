@@ -213,7 +213,7 @@ function SatelliteVisionApp() {
     reset();
     setUploadedImage(item.uploadedImage);
     setResults(item.results);
-    setCurrentStage(5);
+    setCurrentStage(9);
     addLog("HISTORY", `Restored processed run: ${item.filename}`);
   };
 
@@ -254,6 +254,7 @@ function SatelliteVisionApp() {
         }
 
         addLog("VALIDATE", "Uploading satellite image to server AI engine...");
+        setCurrentStage(2);
         await new Promise((r) => setTimeout(r, 100));
 
         addLog("VALIDATE", "Initializing PyTorch Reconstruction Model on Server...");
@@ -286,15 +287,19 @@ function SatelliteVisionApp() {
         previewCtx.drawImage(previewImg, 0, 0);
         const previewPixels = previewCtx.getImageData(0, 0, previewImg.width, previewImg.height);
 
-        setCurrentStage(2);
+        setCurrentStage(3);
         addLog(
           "CLOUD_DETECT",
           "Advanced Cloud segmentation: combining LAB, HSV, adaptive thresholds, and morphology",
         );
         addLog("CLOUD_DETECT", `Total cloud coverage estimated at ${response.cloudPercentage}%`);
-        await new Promise((r) => setTimeout(r, 300));
+        await new Promise((r) => setTimeout(r, 150));
 
-        setCurrentStage(3);
+        setCurrentStage(4);
+        addLog("CLOUD_DETECT", "Generating Cloud Mask...");
+        await new Promise((r) => setTimeout(r, 150));
+
+        setCurrentStage(5);
         addLog(
           "RECONSTRUCT",
           "PyTorch Generative AI edge propagation & multi-scale blending active",
@@ -303,17 +308,25 @@ function SatelliteVisionApp() {
           "RECONSTRUCT",
           `Terrain context: ${response.terrainContext.primaryLandUse} (${response.terrainContext.textureComplexity} texture complexity)`,
         );
-        await new Promise((r) => setTimeout(r, 300));
+        await new Promise((r) => setTimeout(r, 150));
 
-        setCurrentStage(4);
+        setCurrentStage(6);
+        addLog("RECONSTRUCT", "Generating Terrain Prediction...");
+        await new Promise((r) => setTimeout(r, 150));
+
+        setCurrentStage(7);
         addLog(
           "CONFIDENCE",
           "Confidence mapping: distance transform and opacity analysis computed",
         );
         await new Promise((r) => setTimeout(r, 200));
 
+        setCurrentStage(8);
+        addLog("CONFIDENCE", "Finalizing Results...");
+        await new Promise((r) => setTimeout(r, 100));
+
         const elapsed = Date.now() - startTime;
-        setCurrentStage(5);
+        setCurrentStage(9);
         addLog(
           "OUTPUT",
           `AI reconstruction complete in ${response.processingTimeMs}ms (using ${response.deviceUsed})`,
@@ -418,6 +431,7 @@ function SatelliteVisionApp() {
           setDragActive={setDragActive}
           uploadedImage={uploadedImage}
           isProcessing={isProcessing}
+          currentStage={currentStage}
           onDrop={onDrop}
           onPick={() => inputRef.current?.click()}
         />
@@ -513,11 +527,26 @@ function Header() {
           </div>
         </div>
         <span className="text-mono hidden rounded-full border border-secondary/40 bg-secondary/10 px-3 py-1 text-[11px] text-secondary-foreground/90 sm:inline-block">
-          Powered by Claude Vision
+          AI Reconstruction Engine
         </span>
       </div>
     </header>
   );
+}
+
+function getStageText(stage: number) {
+  switch (stage) {
+    case 1: return "Uploading Image...";
+    case 2: return "Validating...";
+    case 3: return "Detecting Clouds...";
+    case 4: return "Generating Cloud Mask...";
+    case 5: return "Running AI Reconstruction...";
+    case 6: return "Generating Terrain Prediction...";
+    case 7: return "Creating Confidence Map...";
+    case 8: return "Finalizing Results...";
+    case 9: return "Completed";
+    default: return "Processing...";
+  }
 }
 
 function UploadZone({
@@ -525,6 +554,7 @@ function UploadZone({
   setDragActive,
   uploadedImage,
   isProcessing,
+  currentStage,
   onDrop,
   onPick,
 }: {
@@ -532,6 +562,7 @@ function UploadZone({
   setDragActive: (v: boolean) => void;
   uploadedImage: string | null;
   isProcessing: boolean;
+  currentStage: number;
   onDrop: (e: React.DragEvent) => void;
   onPick: () => void;
 }) {
@@ -562,9 +593,9 @@ function UploadZone({
         <button
           onClick={onPick}
           disabled={isProcessing}
-          className="mt-2 rounded-md border border-primary/60 bg-primary/10 px-4 py-2 text-sm font-medium text-primary transition hover:bg-primary/20 disabled:opacity-50"
+          className="mt-2 rounded-md border border-primary/60 bg-primary/10 px-4 py-2 text-sm font-medium text-primary transition hover:bg-primary/20 disabled:opacity-50 min-w-[200px]"
         >
-          {isProcessing ? "Processing..." : "Select Image"}
+          {isProcessing ? getStageText(currentStage) : "Select Image"}
         </button>
         <p className="text-mono text-[10px] text-muted-foreground">
           max 4MB · downscaled to 1024px on longest side
@@ -598,13 +629,29 @@ function PipelineBar({
           Processing Pipeline
         </p>
         <p className="text-mono text-[11px] text-muted-foreground">
-          {isProcessing ? "ACTIVE" : currentStage >= 5 ? "COMPLETE" : "IDLE"}
+          {isProcessing ? "ACTIVE" : currentStage >= 9 ? "COMPLETE" : "IDLE"}
         </p>
       </div>
       <div className="flex items-center">
         {STAGES.map((s, i) => {
-          const isDone = currentStage > i;
-          const isActive = currentStage === i + 1 && isProcessing;
+          let isDone = false;
+          let isActive = false;
+          if (i === 0) {
+            isDone = currentStage > 1;
+            isActive = currentStage === 1 && isProcessing;
+          } else if (i === 1) {
+            isDone = currentStage > 2;
+            isActive = currentStage === 2 && isProcessing;
+          } else if (i === 2) {
+            isDone = currentStage > 4;
+            isActive = (currentStage === 3 || currentStage === 4) && isProcessing;
+          } else if (i === 3) {
+            isDone = currentStage > 7;
+            isActive = (currentStage === 5 || currentStage === 6 || currentStage === 7) && isProcessing;
+          } else if (i === 4) {
+            isDone = currentStage >= 9;
+            isActive = (currentStage === 8) && isProcessing;
+          }
           const Icon = s.Icon;
           return (
             <div key={s.label} className="flex flex-1 items-center">

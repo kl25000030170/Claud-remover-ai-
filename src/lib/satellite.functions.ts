@@ -16,6 +16,42 @@ export const analyzeSatelliteImage = createServerFn({ method: "POST" })
   .inputValidator((data: unknown) => inputSchema.parse(data))
   .handler(async ({ data }) => {
     const timestamp = Date.now();
+
+    // 1. FAST PATH: Attempt fetching from the persistent Python server
+    const serverUrl = "http://127.0.0.1:8000/analyze";
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 15000); // 15 seconds timeout
+
+    try {
+      console.log(`[DevOps] Attempting fast execution via python daemon at: ${serverUrl}`);
+      const response = await fetch(serverUrl, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          imageBase64: data.imageBase64,
+          mediaType: data.mediaType,
+        }),
+        signal: controller.signal,
+      });
+
+      clearTimeout(timeoutId);
+
+      if (response.ok) {
+        const result = await response.json();
+        if (result.error) {
+          throw new Error(result.error);
+        }
+        console.log("[DevOps] Fast execution successful! No process spawned.");
+        return result;
+      } else {
+        console.warn("[DevOps] Python server responded with error. Falling back to CLI execution.");
+      }
+    } catch (fetchErr) {
+      clearTimeout(timeoutId);
+      console.warn(`[DevOps] Python daemon not available or timed out: ${(fetchErr as Error).message}. Falling back to CLI execution.`);
+    }
+
+    // 2. SLOW FALLBACK: Standard process execution (files on disk)
     const tempDir = path.join(process.cwd(), "tmp_reconstruct_" + timestamp);
 
     // Ensure directory exists

@@ -2,10 +2,13 @@
 FROM nikolaik/python-nodejs:python3.11-nodejs20-slim
 
 # Install system libraries needed by OpenCV and compile tools
-# Replaced deprecated libgl1-mesa-glx with libgl1
+# Replaced deprecated libgl1-mesa-glx with non-deprecated graphics libraries
 RUN apt-get update && apt-get install -y --no-install-recommends \
     libgl1 \
     libglib2.0-0 \
+    libsm6 \
+    libxrender1 \
+    libxext6 \
     build-essential \
     && rm -rf /var/lib/apt/lists/*
 
@@ -38,5 +41,6 @@ RUN npm run build
 ENV PORT=8080
 EXPOSE 8080
 
-# Command to run the Node.js production server
-CMD ["node", ".output/server/index.mjs"]
+# Configure startup command
+RUN chmod +x start.sh
+CMD ["./start.sh"]
