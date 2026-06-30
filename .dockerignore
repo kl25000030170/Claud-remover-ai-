@@ -1,0 +1,22 @@
+# Ignore folders not needed in the production image
+node_modules/
+.output/
+.vinxi/
+.tanstack/
+.lovable/
+.venv/
+__pycache__/
+*.pyc
+
+# Ignore local test data and report files
+test_accuracy_inputs/
+test_accuracy_outputs/
+test_inputs/
+test_outputs/
+test_user_outputs/
+
+# Ensure PyTorch model checkpoints and weight files are NOT excluded
+!*.pth
+!checkpoints/
+!models/
+!weights/

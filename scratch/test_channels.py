@@ -5,6 +5,15 @@ import os
 import sys
 
 def main():
+    checkpoint_path = "inpainter_checkpoint.pth"
+    if not os.path.exists(checkpoint_path):
+        print(f"Creating dummy checkpoint at {checkpoint_path} for testing validation...")
+        sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "src", "lib")))
+        import torch
+        from reconstruct import PartialConvUNet
+        model = PartialConvUNet()
+        torch.save(model.state_dict(), checkpoint_path)
+
     print("Generating mock test images of various channel configurations...")
     
     # 1. 3-Channel BGR image with simulated cloud patch

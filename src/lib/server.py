@@ -30,23 +30,42 @@ app = FastAPI(title="CloudClear AI Production Server")
 # Singleton Model Initialization
 device = check_device()
 reconst_model = None
+model_loaded = False
 
 @app.on_event("startup")
 def load_models():
-    global reconst_model
+    global reconst_model, model_loaded
+    import torch
+    
+    torch.set_num_threads(1)
+    
     reconst_model = PartialConvUNet().to(device)
+    param_count = sum(p.numel() for p in reconst_model.parameters())
+    print(f"[AI] Model parameter count: {param_count}")
+    
     checkpoint_path = "inpainter_checkpoint.pth"
-    if os.path.exists(checkpoint_path):
+    abs_path = os.path.abspath(checkpoint_path)
+    print(f"[AI] Loading checkpoint absolute path: {abs_path}")
+    
+    exists = os.path.exists(checkpoint_path)
+    print(f"[AI] Checkpoint exists: {exists}")
+    
+    if exists:
+        size_bytes = os.path.getsize(checkpoint_path)
+        print(f"[AI] Checkpoint size: {size_bytes} bytes")
         try:
-            import torch
             reconst_model.load_state_dict(torch.load(checkpoint_path, map_location=device))
             reconst_model.eval()
-            print(f"Loaded PartialConvUNet model from checkpoint: {checkpoint_path} on device: {device}")
+            model_loaded = True
+            print("[AI] Checkpoint load success: True")
         except Exception as e:
-            print(f"Warning: Failed to load checkpoint {checkpoint_path}: {str(e)}")
+            print(f"[AI] Checkpoint load success: False (Error: {str(e)})")
+            model_loaded = False
+            raise RuntimeError(f"Failed to load checkpoint: {str(e)}")
     else:
-        print(f"Warning: No pretrained checkpoint found at {checkpoint_path}")
-    reconst_model.eval()
+        print("[AI] Checkpoint load success: False (Missing file)")
+        model_loaded = False
+        raise FileNotFoundError(f"Pretrained model weights ({checkpoint_path}) are missing! Aborting server startup to prevent running untrained network.")
 
 class AnalyzeRequest(BaseModel):
     imageBase64: str
@@ -120,12 +139,17 @@ def analyze(req: AnalyzeRequest):
         terrain_map, terrain_labels = generate_terrain_classification_map(img, mask_binary, device)
         
         # 3. Perform Deep-Learning Inpainting
-        import torch
-        with torch.no_grad():
-            if cloud_percentage > 0:
+        if cloud_percentage > 0:
+            if reconst_model is None or not model_loaded:
+                raise HTTPException(
+                    status_code=500,
+                    detail="Reconstruction aborted: Pretrained model weights (inpainter_checkpoint.pth) were not loaded. Never initializing untrained model."
+                )
+            import torch
+            with torch.no_grad():
                 reconstructed = perform_ai_inpainting(img, mask_binary, device, reconst_model, terrain_labels)
-            else:
-                reconstructed = img.copy()
+        else:
+            reconstructed = img.copy()
                 
         inference_time = (time.time() - inf_start) * 1000
         

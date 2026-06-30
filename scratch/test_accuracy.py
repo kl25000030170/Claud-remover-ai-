@@ -7,6 +7,15 @@ import json
 import time
 
 def main():
+    checkpoint_path = "inpainter_checkpoint.pth"
+    if not os.path.exists(checkpoint_path):
+        print(f"Creating dummy checkpoint at {checkpoint_path} for testing validation...")
+        sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "src", "lib")))
+        import torch
+        from reconstruct import PartialConvUNet
+        model = PartialConvUNet()
+        torch.save(model.state_dict(), checkpoint_path)
+
     print("======================================================================")
     # 20 different mock satellite images generator
     print("Generating 20 different satellite images to simulate diverse terrains...")

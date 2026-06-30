@@ -1102,19 +1102,32 @@ def main():
     # Load reconstruction model from checkpoint at startup; log device (CPU/CUDA)
     reconst_model = PartialConvUNet().to(device)
     checkpoint_path = "inpainter_checkpoint.pth"
-    reconstruction_note = None
+    abs_path = os.path.abspath(checkpoint_path)
+    exists = os.path.exists(checkpoint_path)
+    size_bytes = os.path.getsize(checkpoint_path) if exists else 0
+    param_count = sum(p.numel() for p in reconst_model.parameters())
     
-    if os.path.exists(checkpoint_path):
+    sys.stderr.write(f"[AI] Model parameter count: {param_count}\n")
+    sys.stderr.write(f"[AI] Loading checkpoint absolute path: {abs_path}\n")
+    sys.stderr.write(f"[AI] Checkpoint exists: {exists}\n")
+    if exists:
+        sys.stderr.write(f"[AI] Checkpoint size: {size_bytes} bytes\n")
+        
+    # Set thread limit for CPU optimization
+    torch.set_num_threads(1)
+    
+    if exists:
         try:
             reconst_model.load_state_dict(torch.load(checkpoint_path, map_location=device))
-            sys.stderr.write(f"Loaded PartialConvUNet model from checkpoint: {checkpoint_path} on device: {device}\n")
+            reconst_model.eval()
+            sys.stderr.write("[AI] Checkpoint load success: True\n")
             reconstruction_note = "Model loaded successfully from checkpoint."
         except Exception as e:
-            sys.stderr.write(f"Warning: Failed to load checkpoint {checkpoint_path}: {str(e)}. Initializing untrained model.\n")
-            reconstruction_note = f"Limited quality — model undertrained. Checkpoint failed to load: {str(e)}"
+            sys.stderr.write(f"[AI] Checkpoint load success: False (Error: {str(e)})\n")
+            raise RuntimeError(f"Failed to load checkpoint: {str(e)}")
     else:
-        sys.stderr.write(f"Warning: No pretrained checkpoint found at {checkpoint_path}. Initializing untrained PartialConvUNet. Device used: {device}\n")
-        reconstruction_note = "Limited quality — model undertrained. Pretrained weights not loaded at inpainter_checkpoint.pth."
+        sys.stderr.write("[AI] Checkpoint load success: False (Missing file)\n")
+        raise FileNotFoundError(f"Aborting inference: Pretrained model weights ({checkpoint_path}) are missing! Never initializing untrained model.")
         
     # Load and validate image using our robust validator
     try:
