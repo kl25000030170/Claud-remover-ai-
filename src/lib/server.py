@@ -177,7 +177,7 @@ def analyze_locked(req: AnalyzeRequest, start_time: float):
             )
         import torch
         with torch.no_grad():
-            reconstructed = perform_ai_inpainting(img, mask_binary, device, reconst_model, terrain_labels)
+            reconstructed = perform_ai_inpainting(img, mask_binary, device, reconst_model, terrain_labels, start_time=start_time)
     else:
         reconstructed = img.copy()
             
@@ -297,7 +297,11 @@ def analyze_locked(req: AnalyzeRequest, start_time: float):
     confidence_base64 = to_base64(heatmap)
     terrain_base64 = to_base64(terrain_map)
     
-    reconstruction_note = "Model loaded successfully from checkpoint." if os.path.exists("inpainter_checkpoint.pth") else "Limited quality — model undertrained."
+    import reconstruct
+    if reconstruct.reconstruction_warning_flag:
+        reconstruction_note = reconstruct.reconstruction_warning_flag
+    else:
+        reconstruction_note = "Model loaded successfully from checkpoint." if os.path.exists("inpainter_checkpoint.pth") else "Limited quality — model undertrained."
     
     return {
         "cloud_percentage": float(round(cloud_percentage, 2)),

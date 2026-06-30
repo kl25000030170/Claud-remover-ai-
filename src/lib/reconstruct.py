@@ -511,20 +511,7 @@ def detect_clouds(img, device):
     
     return final_mask, mask_soft
 
-def generate_terrain_classification_map(img, mask_binary, device):
-    """
-    Classifies surrounding terrain per pixel and fills cloud regions using context.
-    Classes:
-    0: Urban Area
-    1: Buildings
-    2: Roads
-    3: Forest
-    4: Agriculture
-    5: Water Body
-    6: Mountain
-    7: Desert
-    8: Bare Land
-    """
+def generate_terrain_classification_map_inner(img, mask_binary, device):
     h, w, c = img.shape
     hsv = safe_color_convert(img, cv2.COLOR_BGR2HSV)
     h_ch, s_ch, v_ch = cv2.split(hsv)
@@ -609,6 +596,20 @@ def generate_terrain_classification_map(img, mask_binary, device):
         
     color_map_smoothed = cv2.bilateralFilter(color_map, d=5, sigmaColor=75, sigmaSpace=75)
     return color_map_smoothed, smoothed_labels
+
+def generate_terrain_classification_map(img, mask_binary, device):
+    """
+    Classifies surrounding terrain per pixel and fills cloud regions using context.
+    """
+    try:
+        return generate_terrain_classification_map_inner(img, mask_binary, device)
+    except Exception as e:
+        sys.stderr.write(f"[AI-Terrain] Classification failed: {str(e)}. Returning default map.\n")
+        h, w, c = img.shape
+        color_map = np.zeros((h, w, 3), dtype=np.uint8)
+        color_map[:, :] = [35, 107, 142] # Default Bare Land color BGR
+        smoothed_labels = np.full((h, w), 8, dtype=np.int32)
+        return color_map, smoothed_labels
 
 def estimate_hidden_terrain_features(terrain_labels, mask_binary, img):
     """
@@ -866,11 +867,19 @@ def get_current_ram_mb():
     else:
         return raw / 1024.0
 
-def perform_ai_inpainting(img, mask_binary, device, reconst_model, terrain_labels=None):
-    """
-    Upgraded Production-quality Deep Learning-based inpainting using PartialConvUNet.
-    Reconstructs inside the mask using the pre-trained checkpoint weights.
-    """
+reconstruction_warning_flag = None
+
+def run_lightweight_opencv_inpaint(img, mask_binary):
+    import cv2
+    import numpy as np
+    # Ensure mask is 1-channel uint8
+    if mask_binary.ndim == 3:
+        mask_binary = cv2.cvtColor(mask_binary, cv2.COLOR_BGR2GRAY)
+    # OpenCV Navier-Stokes based inpainting
+    reconstructed = cv2.inpaint(img, mask_binary, 3, cv2.INPAINT_NS)
+    return reconstructed
+
+def perform_ai_inpainting_inner(img, mask_binary, device, reconst_model, terrain_labels=None, start_time=None):
     import gc
     import time
     gc.collect()
@@ -969,6 +978,38 @@ def perform_ai_inpainting(img, mask_binary, device, reconst_model, terrain_label
     ram_after = get_current_ram_mb()
     sys.stderr.write(f"[AI-Inpaint] Completed in {inf_time_ms:.1f}ms. RAM usage: {ram_after:.2f} MB (Change: {ram_after - ram_before:.2f} MB)\n")
     return processed
+
+def perform_ai_inpainting(img, mask_binary, device, reconst_model, terrain_labels=None, start_time=None):
+    global reconstruction_warning_flag
+    reconstruction_warning_flag = None
+    
+    # 1. 20-second timeout check
+    if start_time is not None:
+        elapsed = time.time() - start_time
+        if elapsed > 20.0:
+            sys.stderr.write(f"[AI-Inpaint] Timeout warning: {elapsed:.2f}s elapsed. Skipping heavy AI reconstruction.\n")
+            reconstruction_warning_flag = "Heavy reconstruction skipped due to server resource limits."
+            return run_lightweight_opencv_inpaint(img, mask_binary)
+            
+    # 2. Memory threshold check
+    try:
+        ram_curr = get_current_ram_mb()
+        if ram_curr > 400.0: # Switch to lightweight fallback if RAM usage > 400MB
+            sys.stderr.write(f"[AI-Inpaint] Low memory warning: {ram_curr:.2f} MB. Using lightweight OpenCV fallback.\n")
+            reconstruction_warning_flag = "Heavy reconstruction skipped due to server resource limits."
+            return run_lightweight_opencv_inpaint(img, mask_binary)
+    except Exception as e:
+        sys.stderr.write(f"[AI-Inpaint] Memory check failed: {str(e)}\n")
+        
+    # 3. PyTorch execution with fallback wrapper
+    try:
+        return perform_ai_inpainting_inner(img, mask_binary, device, reconst_model, terrain_labels, start_time)
+    except (MemoryError, RuntimeError, Exception) as err:
+        sys.stderr.write(f"[AI-Inpaint] PyTorch run failed or aborted: {str(err)}. Falling back to lightweight OpenCV inpainting.\n")
+        reconstruction_warning_flag = "Heavy reconstruction skipped due to server resource limits."
+        import gc
+        gc.collect()
+        return run_lightweight_opencv_inpaint(img, mask_binary)
 
 def generate_confidence_map(mask_binary, img):
     """
@@ -1278,7 +1319,7 @@ def main():
     
     # 3. Perform Deep-Learning/Exemplar Inpainting
     if cloud_percentage > 0:
-        reconstructed = perform_ai_inpainting(img, mask_binary, device, reconst_model, terrain_labels)
+        reconstructed = perform_ai_inpainting(img, mask_binary, device, reconst_model, terrain_labels, start_time=start_time)
     else:
         reconstructed = img.copy()
         
@@ -1403,6 +1444,9 @@ def main():
         "typicalColorB": int(b),
         "textureComplexity": complexity
     }
+    
+    if reconstruction_warning_flag:
+        reconstruction_note = reconstruction_warning_flag
         
     output_data = {
         # Phase 8 Final Analysis Report JSON Structure
