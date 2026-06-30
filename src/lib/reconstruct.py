@@ -846,88 +846,107 @@ def texture_refine(reconstructed, mask_src):
         [-0.20, 1.80, -0.20],
         [0, -0.20, 0]
     ], dtype=np.float32)
-    
     sharpened = cv2.filter2D(bilateral, -1, kernel_sharpen)
     out[mask_src] = sharpened[mask_src]
     return out
 
+def get_current_ram_mb():
+    import resource
+    import sys
+    try:
+        with open('/proc/self/status') as f:
+            for line in f:
+                if 'VmRSS:' in line:
+                    return float(line.split()[1]) / 1024.0
+    except:
+        pass
+    raw = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    if sys.platform == "darwin":
+        return raw / (1024.0 * 1024.0)
+    else:
+        return raw / 1024.0
+
 def perform_ai_inpainting(img, mask_binary, device, reconst_model, terrain_labels=None):
     """
     Upgraded Production-quality Deep Learning-based inpainting using PartialConvUNet.
-    Reconstructs inside the mask using a self-supervised context fit,
-    followed by a strict 5-stage post-processing pipeline.
+    Reconstructs inside the mask using the pre-trained checkpoint weights.
     """
+    import gc
+    import time
+    gc.collect()
+    
     h, w, c = img.shape
     start_inf = time.time()
     
-    # 1. Prepare Inputs
-    # Convert BGR to RGB for PyTorch model
-    img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+    ram_before = get_current_ram_mb()
+    sys.stderr.write(f"[AI-Inpaint] Start. Image dimensions: {w}x{h}. RAM usage: {ram_before:.2f} MB\n")
     
-    # Input tensor: normalized float32 [B, 3, H, W], values in [0, 1]
+    # 1. Resize very large uploaded images before reconstruction (Max size: 512x512)
+    need_resize = max(h, w) > 512
+    if need_resize:
+        scale = 512.0 / max(h, w)
+        new_w, new_h = int(w * scale), int(h * scale)
+        img_model = cv2.resize(img, (new_w, new_h), interpolation=cv2.INTER_AREA)
+        mask_model = cv2.resize(mask_binary, (new_w, new_h), interpolation=cv2.INTER_NEAREST)
+        sys.stderr.write(f"[AI-Inpaint] Resized from {w}x{h} to {new_w}x{h} for model execution.\n")
+    else:
+        img_model = img
+        mask_model = mask_binary
+        
+    mh, mw, mc = img_model.shape
+    
+    # Prepare inputs (strictly as uint8/float32 in minimal memory)
+    img_rgb = cv2.cvtColor(img_model, cv2.COLOR_BGR2RGB)
+    
+    # Input tensor: normalized float32
     tensor_img = torch.from_numpy(img_rgb.astype(np.float32) / 255.0).permute(2, 0, 1).unsqueeze(0).to(device)
-    
-    # Mask tensor: binary float32 [B, 1, H, W], 1 = cloud region (masked)
-    # mask_binary has 255 where cloud is. Let's make it 1 where cloud is.
-    tensor_mask = torch.from_numpy((mask_binary > 0).astype(np.float32)).unsqueeze(0).unsqueeze(0).to(device)
-    
-    # PartialConvUNet expects valid = 1, masked = 0.
-    # Therefore we pass (1 - tensor_mask) as the mask to PartialConvUNet!
+    tensor_mask = torch.from_numpy((mask_model > 0).astype(np.float32)).unsqueeze(0).unsqueeze(0).to(device)
     tensor_valid_mask = 1.0 - tensor_mask
     
-    # 2. Self-supervised optimization on downsampled clean context to fit U-Net (Deep Image Prior style)
-    # This aligns the untrained model weights to the current image's texture.
-    train_w, train_h = w, h
-    if max(w, h) > 128:
-        scale = 128.0 / max(w, h)
-        train_w, train_h = int(w * scale), int(h * scale)
-        
-    img_rgb_train = cv2.resize(img_rgb, (train_w, train_h), interpolation=cv2.INTER_AREA)
-    mask_binary_train = cv2.resize(mask_binary, (train_w, train_h), interpolation=cv2.INTER_NEAREST)
+    sys.stderr.write(f"[AI-Inpaint] Tensors initialized. Tensor dimensions: {tensor_img.shape}. RAM usage: {get_current_ram_mb():.2f} MB\n")
     
-    tensor_img_train = torch.from_numpy(img_rgb_train.astype(np.float32) / 255.0).permute(2, 0, 1).unsqueeze(0).to(device)
-    tensor_mask_train = torch.from_numpy((mask_binary_train > 0).astype(np.float32)).unsqueeze(0).unsqueeze(0).to(device)
-    tensor_valid_mask_train = 1.0 - tensor_mask_train
-    
-    local_model = PartialConvUNet().to(device)
-    local_model.load_state_dict(reconst_model.state_dict())
-    local_model.train()
-    
-    optimizer = torch.optim.Adam(local_model.parameters(), lr=0.005)
-    criterion = nn.MSELoss()
-    
-    # Optimization loop (30 steps)
-    for step in range(30):
-        optimizer.zero_grad()
-        output = local_model(tensor_img_train, tensor_valid_mask_train)
-        # Compute loss on clear (valid) pixels only
-        loss = criterion(output * tensor_valid_mask_train, tensor_img_train * tensor_valid_mask_train)
-        loss.backward()
-        optimizer.step()
-        
-    local_model.eval()
+    # Evaluate model (using torch.no_grad() and eval() mode, no gradient computation)
+    reconst_model.eval()
     with torch.no_grad():
-        reconst_out = local_model(tensor_img, tensor_valid_mask)
+        reconst_out = reconst_model(tensor_img, tensor_valid_mask)
         
     # Convert output tensor back to BGR numpy image
     reconst_np = reconst_out.squeeze(0).permute(1, 2, 0).cpu().numpy()
     reconst_np = np.clip(reconst_np * 255.0, 0, 255).astype(np.uint8)
     reconst_bgr = cv2.cvtColor(reconst_np, cv2.COLOR_RGB2BGR)
     
-    # Reconstruct ONLY inside the mask
-    reconstructed = img.copy()
-    mask_indices = mask_binary > 0
-    reconstructed[mask_indices] = reconst_bgr[mask_indices]
+    # Clean up PyTorch memory allocations immediately
+    del tensor_img
+    del tensor_mask
+    del tensor_valid_mask
+    del reconst_out
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+        
+    # Reconstruct ONLY inside the mask on the resized image
+    reconstructed_model = img_model.copy()
+    mask_indices_model = mask_model > 0
+    reconstructed_model[mask_indices_model] = reconst_bgr[mask_indices_model]
     
-    # 3. Create context masks
-    # Dilate mask_binary to extract border context band
+    # Scale back to original resolution if needed
+    if need_resize:
+        reconstructed_full = cv2.resize(reconstructed_model, (w, h), interpolation=cv2.INTER_CUBIC)
+        reconstructed = img.copy()
+        mask_indices = mask_binary > 0
+        reconstructed[mask_indices] = reconstructed_full[mask_indices]
+    else:
+        reconstructed = reconstructed_model
+        mask_indices = mask_binary > 0
+        
+    # 2. Create context masks on the original resolution
     kernel_dil = cv2.getStructuringElement(cv2.MORPH_RECT, (21, 21))
     dilated_mask = cv2.dilate(mask_binary, kernel_dil)
     border_mask = cv2.subtract(dilated_mask, mask_binary) > 0
     if border_mask.sum() == 0:
         border_mask = mask_binary == 0
         
-    # 4. Strict 5-Stage Post Processing Pipeline
+    # 3. Strict 5-Stage Post Processing Pipeline
     # Stage 1: Histogram matching
     processed = match_histograms(reconstructed, img, mask_indices, border_mask)
     
@@ -947,8 +966,8 @@ def perform_ai_inpainting(img, mask_binary, device, reconst_model, terrain_label
     processed[mask_binary == 0] = img[mask_binary == 0]
     
     inf_time_ms = (time.time() - start_inf) * 1000
-    sys.stderr.write(f"Inpainting inference completed in {inf_time_ms:.1f}ms\n")
-    
+    ram_after = get_current_ram_mb()
+    sys.stderr.write(f"[AI-Inpaint] Completed in {inf_time_ms:.1f}ms. RAM usage: {ram_after:.2f} MB (Change: {ram_after - ram_before:.2f} MB)\n")
     return processed
 
 def generate_confidence_map(mask_binary, img):
