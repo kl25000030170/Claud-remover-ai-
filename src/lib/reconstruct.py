@@ -1202,7 +1202,8 @@ def main():
             "notSatelliteReason": str(e),
             "maskPath": "",
             "reconstPath": "",
-            "confidencePath": ""
+            "confidencePath": "",
+            "terrainContext": None
         }))
         sys.exit(0)
         
@@ -1232,7 +1233,8 @@ def main():
             "maskPath": "",
             "reconstPath": "",
             "confidencePath": "",
-            "terrainMapPath": ""
+            "terrainMapPath": "",
+            "terrainContext": None
         }))
         sys.exit(0)
     
@@ -1388,6 +1390,20 @@ def main():
         terrain_prediction = "Uncertain"
         terrain_confidence = 0.0
         
+    secondary_landuse = "unknown"
+    if len(predicted_features) > 1:
+        secondary_landuse = predicted_features[1].get("class", "unknown").lower()
+        
+    terrain_context = {
+        "primaryLandUse": primary_landuse,
+        "secondaryLandUse": secondary_landuse,
+        "confidence": float(round(terrain_confidence, 2)),
+        "typicalColorR": int(r),
+        "typicalColorG": int(g),
+        "typicalColorB": int(b),
+        "textureComplexity": complexity
+    }
+        
     output_data = {
         # Phase 8 Final Analysis Report JSON Structure
         "cloud_percentage": float(round(cloud_percentage, 2)),
@@ -1403,6 +1419,7 @@ def main():
         "device": str(device),
         "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "reconstruction_note": reconstruction_note,
+        "terrainContext": terrain_context,
         
         # Legacy fields for UI index.tsx backward compatibility
         "cloudPercentage": float(round(cloud_percentage, 1)),

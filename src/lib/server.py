@@ -127,7 +127,8 @@ def analyze_locked(req: AnalyzeRequest, start_time: float):
             "typicalColorB": 0,
             "textureComplexity": "low",
             "qualityReport": f"Image rejected: {reject_reason}",
-            "notSatelliteReason": reject_reason
+            "notSatelliteReason": reject_reason,
+            "terrainContext": None
         }
         
     # 1. Advanced Cloud Detection
@@ -263,6 +264,20 @@ def analyze_locked(req: AnalyzeRequest, start_time: float):
         terrain_prediction = "Uncertain"
         terrain_confidence = 0.0
         
+    secondary_landuse = "unknown"
+    if len(predicted_features) > 1:
+        secondary_landuse = predicted_features[1].get("class", "unknown").lower()
+        
+    terrain_context = {
+        "primaryLandUse": primary_landuse,
+        "secondaryLandUse": secondary_landuse,
+        "confidence": float(round(terrain_confidence, 2)),
+        "typicalColorR": int(r),
+        "typicalColorG": int(g),
+        "typicalColorB": int(b),
+        "textureComplexity": complexity
+    }
+        
     # Convert images to base64
     original_base64 = to_base64(img)
     mask_base64 = to_base64(mask_binary)
@@ -287,6 +302,7 @@ def analyze_locked(req: AnalyzeRequest, start_time: float):
         "device": str(device),
         "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "reconstruction_note": reconstruction_note,
+        "terrainContext": terrain_context,
         
         # Legacy fields for UI index.tsx backward compatibility
         "cloudPercentage": float(round(cloud_percentage, 1)),

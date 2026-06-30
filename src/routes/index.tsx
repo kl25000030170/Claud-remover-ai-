@@ -58,7 +58,7 @@ interface ClaudeAnalysis {
     typicalColorG: number;
     typicalColorB: number;
     textureComplexity: string;
-  };
+  } | null;
   notSatelliteReason: string | null;
   isDemoMode?: boolean;
 }
@@ -299,15 +299,22 @@ function SatelliteVisionApp() {
         addLog("CLOUD_DETECT", "Generating Cloud Mask...");
         await new Promise((r) => setTimeout(r, 150));
 
+        // Defensive validation of response object
+        console.log("[Client] API Response:", response);
+        if (!response) {
+          console.error("[Client] Malformed API response received:", response);
+        }
+
         setCurrentStage(5);
         addLog(
           "RECONSTRUCT",
           "PyTorch Generative AI edge propagation & multi-scale blending active",
         );
-        addLog(
-          "RECONSTRUCT",
-          `Terrain context: ${response.terrainContext.primaryLandUse} (${response.terrainContext.textureComplexity} texture complexity)`,
-        );
+        
+        const terrainContextText = response?.terrainContext
+          ? `Terrain context: ${response.terrainContext.primaryLandUse || "Unknown"} (${response.terrainContext.textureComplexity || "unknown"} texture complexity)`
+          : "Terrain prediction unavailable for this image.";
+        addLog("RECONSTRUCT", terrainContextText);
         await new Promise((r) => setTimeout(r, 150));
 
         setCurrentStage(6);

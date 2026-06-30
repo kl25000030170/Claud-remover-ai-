@@ -117,13 +117,7 @@ export const analyzeSatelliteImage = createServerFn({ method: "POST" })
         cloudRegions: [], // Handled entirely server-side now
         cloudThresholds: { brightnessMin: 0, saturationMax: 0 },
         terrainFeatures: result.terrainFeatures,
-        terrainContext: {
-          primaryLandUse: result.primaryLandUse,
-          typicalColorR: result.typicalColorR,
-          typicalColorG: result.typicalColorG,
-          typicalColorB: result.typicalColorB,
-          textureComplexity: result.textureComplexity,
-        },
+        terrainContext: result.terrainContext || null,
         notSatelliteReason: result.notSatelliteReason,
         isDemoMode: false,
 
