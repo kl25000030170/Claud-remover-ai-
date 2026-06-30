@@ -319,17 +319,16 @@ def preprocess_image(img):
 
 def detect_clouds(img, device):
     """
-    Upgraded Cloud & Haze Detection Module.
+    Upgraded Production Hybrid Cloud & Haze Detection Module.
     Combines Dark Channel Prior (DCP) for thin clouds/haze, LAB color neutrality,
-    dynamic U-Net semantic segmentation adaptation, and directional shadow detection.
+    dynamic HSV, adaptive threshold relaxation feedback loop, U-Net semantic segmentation adaptation,
+    directional shadow detection, morphologic border smoothing, and connect-component noise filtering.
     """
     start_time = time.time()
     h, w, c = img.shape
     total_pixels = h * w
     
     gray = safe_color_convert(img, cv2.COLOR_BGR2GRAY)
-    mean_brightness = float(gray.mean())
-    
     hsv = safe_color_convert(img, cv2.COLOR_BGR2HSV)
     h_ch, s_ch, v_ch = cv2.split(hsv)
     
@@ -346,23 +345,7 @@ def detect_clouds(img, device):
     local_mean_l = cv2.blur(l_ch.astype(np.float32), (41, 41))
     local_diff_l = l_ch.astype(np.float32) - local_mean_l
     
-    # Dynamic threshold adaptation for highly desaturated/gray images (concrete, rocks, sand, foam) to prevent false positives
-    lightness_boost = 0.0
-    if s_ch.mean() < 35.0:
-        lightness_boost = 35.0
-        
-    # 1. Thin Clouds & Haze: high dark channel, desaturated, neutral LAB, local contrast check
-    is_thin_cloud_or_haze = (dark_channel > 130) & (s_ch < 45) & (dist_neutral < 12) & (l_ch > (140 + lightness_boost)) & (local_diff_l > 12)
-    
-    # 2. Thick Clouds: very bright, desaturated, neutral LAB, local contrast check
-    is_thick_cloud = (l_ch > (170 + lightness_boost)) & (s_ch < 40) & (dist_neutral < 10) & (local_diff_l > 15)
-    
-    # 3. Local contrast-based candidate clouds
-    is_contrast_cloud = (local_diff_l > (20 + lightness_boost)) & (s_ch < 40) & (dist_neutral < 12)
-    
-    heuristic_cloud = (is_thin_cloud_or_haze | is_thick_cloud | is_contrast_cloud).astype(np.uint8) * 255
-    
-    # Snow filter: globally snow check vs local clouds
+    # Exclude non-cloud features (Snow, Sand, Edges)
     is_globally_snow = (l_ch.mean() > 190) and (s_ch.mean() < 25)
     b_val, g_val, r_val = cv2.split(img)
     if is_globally_snow:
@@ -370,23 +353,69 @@ def detect_clouds(img, device):
     else:
         snow_mask = np.zeros((h, w), dtype=bool)
         
-    # Sand filter
     sand_mask = (r_val.astype(np.float32) > b_val.astype(np.float32) + 25) & \
                 (g_val.astype(np.float32) > b_val.astype(np.float32) + 10) & \
                 (s_ch > 25)
                 
-    # Ridges & edge filters
     sobelx = cv2.Sobel(gray, cv2.CV_32F, 1, 0, ksize=3)
     sobely = cv2.Sobel(gray, cv2.CV_32F, 0, 1, ksize=3)
     magnitude = cv2.magnitude(sobelx, sobely)
     terrain_edges = (magnitude > 50) & (s_ch < 45)
+
+    # Count candidate pixels to assess visual coverage
+    candidate_pixels = (l_ch > 130) & (s_ch < 60) & (dist_neutral < 18)
+    candidate_ratio = float(candidate_pixels.sum() / total_pixels)
+
+    # Initial thresholds (conservative)
+    l_thick_thresh = 160.0
+    s_thick_thresh = 45.0
+    dist_thick_thresh = 12.0
     
-    # Exclude non-cloud structures
-    clean_heuristic = heuristic_cloud.copy()
-    clean_heuristic[snow_mask] = 0
-    clean_heuristic[sand_mask] = 0
-    clean_heuristic[terrain_edges] = 0
-    
+    dcp_thin_thresh = 125.0
+    s_thin_thresh = 45.0
+    dist_thin_thresh = 14.0
+    l_thin_thresh = 135.0
+
+    # Multi-pass adaptation loop to prevent under-segmentation
+    for run_idx in range(3):
+        # 1. Thin Clouds & Haze
+        is_thin_cloud_or_haze = (dark_channel > dcp_thin_thresh) & (s_ch < s_thin_thresh) & (dist_neutral < dist_thin_thresh) & (l_ch > l_thin_thresh)
+        
+        # 2. Thick Clouds
+        is_thick_cloud = (l_ch > l_thick_thresh) & (s_ch < s_thick_thresh) & (dist_neutral < dist_thick_thresh)
+        
+        # 3. Gray Clouds / Haze
+        is_gray_cloud = (l_ch > 115) & (s_ch < 35) & (dist_neutral < 10) & (dark_channel > 100)
+        
+        # 4. Contrast-based clouds
+        is_contrast_cloud = (local_diff_l > 15) & (s_ch < 40) & (dist_neutral < 12) & (l_ch > 120)
+        
+        heuristic_cloud = (is_thin_cloud_or_haze | is_thick_cloud | is_gray_cloud | is_contrast_cloud).astype(np.uint8) * 255
+        
+        # Exclude non-cloud structures
+        clean_heuristic = heuristic_cloud.copy()
+        clean_heuristic[snow_mask] = 0
+        clean_heuristic[sand_mask] = 0
+        clean_heuristic[terrain_edges] = 0
+        
+        detected_percentage = float((clean_heuristic > 0).sum() / total_pixels * 100)
+        sys.stderr.write(f"[AI-Detect] Pass {run_idx}: candidate={candidate_ratio*100:.1f}%, detected={detected_percentage:.1f}%\n")
+        
+        # If candidate count suggests substantial clouds (>8%) but check returned almost nothing (<2.5%),
+        # dynamically relax detection requirements
+        if candidate_ratio > 0.08 and detected_percentage < 2.5:
+            l_thick_thresh -= 20.0
+            s_thick_thresh += 10.0
+            dist_thick_thresh += 3.0
+            
+            dcp_thin_thresh -= 20.0
+            s_thin_thresh += 10.0
+            dist_thin_thresh += 3.0
+            l_thin_thresh -= 15.0
+            sys.stderr.write(f"[AI-Detect] Under-segmentation detected. Relaxing limits for next pass.\n")
+        else:
+            break
+            
     if clean_heuristic.sum() == 0:
         inference_time = (time.time() - start_time) * 1000
         sys.stderr.write(f"\n===== CLOUD DETECTION DEBUG LOG =====\n")
@@ -433,19 +462,19 @@ def detect_clouds(img, device):
         
     # Segment fusion
     final_prob = (unet_prob * 0.65) + ((clean_heuristic / 255.0) * 0.35)
-    binary_mask = (final_prob >= 0.50).astype(np.uint8) * 255
+    binary_mask = (final_prob >= 0.40).astype(np.uint8) * 255
     
     # Shadow detection: dark regions near cloud structures
-    dark_pixels = (v_ch < 80) & (s_ch < 55)
+    dark_pixels = (v_ch < 85) & (s_ch < 60)
     shadow_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (35, 35))
     shadow_zone = cv2.dilate(binary_mask, shadow_kernel)
     shadow_mask = dark_pixels & (shadow_zone > 0)
     binary_mask = cv2.bitwise_or(binary_mask, shadow_mask.astype(np.uint8) * 255)
     
     # Refinement morphology
-    kernel_open = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
-    kernel_close = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (9, 9))
-    kernel_dilate = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+    kernel_open = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+    kernel_close = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (15, 15))
+    kernel_dilate = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
     
     refined = cv2.morphologyEx(binary_mask, cv2.MORPH_OPEN, kernel_open)
     refined = cv2.morphologyEx(refined, cv2.MORPH_CLOSE, kernel_close)
@@ -462,12 +491,12 @@ def detect_clouds(img, device):
     # Area filter
     num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(filled_mask)
     final_mask = np.zeros_like(filled_mask)
-    min_area = 300
+    min_area = 500
     for i in range(1, num_labels):
         if stats[i, cv2.CC_STAT_AREA] >= min_area:
             final_mask[labels == i] = 255
             
-    mask_soft = cv2.GaussianBlur(final_mask, (5, 5), 0)
+    mask_soft = cv2.GaussianBlur(final_mask, (9, 9), 0)
     
     white_pixels = int(np.sum(final_mask > 0))
     cloud_percentage = float((white_pixels / total_pixels) * 100)
